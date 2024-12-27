@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ZKP Auth Demo</title>
+    <style>
+      body {
+        font-family: "Roboto", sans-serif;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        min-height: 100vh;
+        background-color: #f3f4f6;
+      }
+
+      .container {
+        width: 100%;
+        max-width: 360px;
+        padding: 20px;
+        background: #fff;
+        border-radius: 12px;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+      }
+
+      h1 {
+        font-size: 24px;
+        text-align: center;
+        color: #222;
+        margin-bottom: 24px;
+      }
+
+      h2 {
+        font-size: 18px;
+        color: #333;
+        margin-bottom: 16px;
+      }
+
+      form {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        margin-bottom: 20px;
+      }
+
+      label {
+        font-size: 14px;
+        color: #555;
+      }
+
+      input {
+        padding: 10px;
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        font-size: 14px;
+        color: #333;
+      }
+
+      input:focus {
+        border-color: #007bff;
+        outline: none;
+      }
+
+      button {
+        padding: 12px;
+        font-size: 14px;
+        font-weight: bold;
+        background-color: #007bff;
+        color: white;
+        border: none;
+        border-radius: 8px;
+        cursor: pointer;
+        transition: background-color 0.2s;
+      }
+
+      button:hover {
+        background-color: #0056b3;
+      }
+
+      .result {
+        font-size: 14px;
+        color: #666;
+        text-align: center;
+        margin-top: 10px;
+      }
+
+      .protected {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+      }
+
+      .protected button {
+        width: 100%;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>ZKP Auth Demo</h1>
+
+      <form id="regForm">
+        <h2>Register</h2>
+        <label for="regUser">Username</label>
+        <input type="text" id="regUser" placeholder="Username" />
+        <label for="regPass">Password</label>
+        <input type="password" id="regPass" placeholder="Password" />
+        <button type="submit">Register</button>
+        <div id="regResult" class="result"></div>
+      </form>
+
+      <form id="loginForm">
+        <h2>Login</h2>
+        <label for="loginUser">Username</label>
+        <input type="text" id="loginUser" placeholder="Username" />
+        <label for="loginPass">Password</label>
+        <input type="password" id="loginPass" placeholder="Password" />
+        <button type="submit">Login</button>
+        <div id="loginResult" class="result"></div>
+      </form>
+
+      <div class="protected">
+        <button id="btnProtected">Access Protected Resource</button>
+        <button id="btnLogout" style="margin-top: 10px">Logout</button>
+        <div id="protectedResult" class="result"></div>
+      </div>
+    </div>
+
+    <script>
+      // ------------------------------------------------
+      // Пример функции для SHA-256 (используем SubtleCrypto)
+      // Возвращаем hex-строку.
+      async function hashPassword(password) {
+        const msgBuffer = new TextEncoder().encode(password);
+        const hashBuffer = await crypto.subtle.digest("SHA-256", msgBuffer);
+        const hashArray = Array.from(new Uint8Array(hashBuffer));
+        const hexString = hashArray
+          .map((b) => b.toString(16).padStart(2, "0"))
+          .join("");
+        return hexString;
+      }
+
+      // Преобразовать hex → BigInt → по модулю (p-1).
+      function passwordToX(hexHash, pMinus1) {
+        let x = BigInt("0x" + hexHash);
+        x = x % pMinus1;
+        if (x === 0n) x = 1n;
+        return x;
+      }
+
+      // Быстрая функция бинарной экспоненциации на BigInt
+      function modExp(base, exp, mod) {
+        let result = 1n;
+        let cur = base % mod;
+        let e = exp;
+        while (e > 0) {
+          if (e & 1n) {
+            result = (result * cur) % mod;
+          }
+          cur = (cur * cur) % mod;
+          e >>= 1n;
+        }
+        return result;
+      }
+
+      // Генерация псевдослучайного BigInt
+      function randomBigInt(max) {
+        // Упрощённо, получаем 32-бит случайное
+        const rand32 = BigInt(Math.floor(Math.random() * 0xffffffff));
+        return (rand32 % (max - 1n)) + 1n;
+      }
+
+      // ------------------------------------------------
+      // 1) Registration
+      // ------------------------------------------------
+      const regForm = document.getElementById("regForm");
+      const regResultDiv = document.getElementById("regResult");
+
+      regForm.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const username = document.getElementById("regUser").value;
+        const password = document.getElementById("regPass").value;
+
+        try {
+          const res = await fetch("http://127.0.0.1:5000/register", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ username, password }),
+          });
+          const data = await res.json();
+          if (res.ok) {
+            regResultDiv.textContent =
+              data.message + ` (p=${data.p}, g=${data.g})`;
+          } else {
+            regResultDiv.textContent = `Error: ${data.error}`;
+          }
+        } catch (err) {
+          regResultDiv.textContent = `Fetch error: ${err}`;
+        }
+      });
+
+      // ------------------------------------------------
+      // 2) Login
+      // ------------------------------------------------
+      const loginForm = document.getElementById("loginForm");
+      const loginResultDiv = document.getElementById("loginResult");
+
+      loginForm.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        loginResultDiv.textContent = "";
+
+        const username = document.getElementById("loginUser").value;
+        const password = document.getElementById("loginPass").value;
+
+        try {
+          // Шаг a) /login/start
+          let res = await fetch("http://127.0.0.1:5000/login/start", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ username }),
+          });
+          let data = await res.json();
+          if (!res.ok) {
+            loginResultDiv.textContent = `Error: ${data.error}`;
+            return;
+          }
+
+          // Из ответа берем p, g, h, e
+          const p = BigInt(data.p);
+          const g = BigInt(data.g);
+          const h = BigInt(data.h);
+          const eVal = BigInt(data.e);
+
+          // Считаем x (хэш пароля) -> BigInt -> mod (p-1)
+          const hexHash = await hashPassword(password);
+          const x = passwordToX(hexHash, p - 1n);
+
+          // Генерируем r, считаем a = g^r mod p
+          const r = randomBigInt(p - 1n);
+          const a = modExp(g, r, p);
+
+          // y = r + e*x (mod p-1)
+          const y = (r + eVal * x) % (p - 1n);
+
+          // Шаг b) /login/finish
+          res = await fetch("http://127.0.0.1:5000/login/finish", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              username,
+              a: a.toString(),
+              y: y.toString(),
+            }),
+            credentials: "include",
+          });
+          data = await res.json();
+          if (res.ok) {
+            loginResultDiv.textContent = data.message; // "Login successful!"
+          } else {
+            loginResultDiv.textContent = `Error: ${data.error}`;
+          }
+        } catch (err) {
+          loginResultDiv.textContent = `Fetch error: ${err}`;
+        }
+      });
+
+      // ------------------------------------------------
+      // 3) Protected
+      // ------------------------------------------------
+      const btnProtected = document.getElementById("btnProtected");
+      const protectedResultDiv = document.getElementById("protectedResult");
+
+      btnProtected.addEventListener("click", async () => {
+        try {
+          const res = await fetch("http://127.0.0.1:5000/protected", {
+            method: "GET",
+            credentials: "include",
+          });
+          const data = await res.json();
+          if (res.ok) {
+            protectedResultDiv.textContent = data.message;
+          } else {
+            protectedResultDiv.textContent = `Error: ${data.error}`;
+          }
+        } catch (err) {
+          protectedResultDiv.textContent = `Fetch error: ${err}`;
+        }
+      });
+
+      const btnLogout = document.getElementById("btnLogout");
+
+      btnLogout.addEventListener("click", async () => {
+        try {
+          const res = await fetch("http://127.0.0.1:5000/logout", {
+            method: "POST",
+            credentials: "include", // Include session cookies
+          });
+          if (res.ok) {
+           
+          } else {
+            const data = await res.json();
+            alert(`Error: ${data.error}`);
+          }
+        } catch (err) {
+          alert(`Fetch error: ${err}`);
+        }
+      });
+    </script>
+  </body>
+</html>
